@@ -123,7 +123,7 @@ CORES_PERCURSOS = [
 
 st.set_page_config(page_title="GeoPackage Viewer", layout="wide")
 
-st.title("🗺️ Simulador de Percursos - OBB")
+st.title("🗺️ Trail Planner - OBB")
 st.markdown("Carregue um arquivo `.gpkg` para visualizar no mapa.")
 
 
