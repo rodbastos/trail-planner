@@ -124,6 +124,8 @@ CORES_PERCURSOS = [
     '#aaffc3', '#808000', '#ffd8b1', '#000075', '#808080'
 ]
 
+WORLD_IMAGERY_TILE_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+
 st.set_page_config(page_title="Trail Planner - Outward Bound Brasil", layout="wide")
 
 st.title("🗺️ Trail Planner - OBB")
@@ -150,6 +152,10 @@ def _trail_style(_feature):
     return {'color': '#473f30', 'weight': 4, 'opacity': 0.75}
 
 
+def _trail_style_world_imagery(_feature):
+    return {'color': '#ffffff', 'weight': 4, 'opacity': 0.85}
+
+
 def _trail_highlight(_feature):
     return {'weight': 8, 'color': 'yellow', 'opacity': 1.0}
 
@@ -162,20 +168,39 @@ def get_base_map_html(
     igc_opacity: float = 0.7,
     show_trail_network: bool = True,
     show_igc: bool = True,
+    basemap_name: str = "OpenStreetMap",
 ) -> folium.Map:
     """Cria o MAPA BASE com todos os segmentos em estilo neutro."""
     center_lat = (bounds_tuple[1] + bounds_tuple[3]) / 2
     center_lon = (bounds_tuple[0] + bounds_tuple[2]) / 2
     map_center = [center_lat, center_lon]
 
-    m = folium.Map(location=map_center, tiles="OpenStreetMap")
+    m = folium.Map(location=map_center, tiles=None)
+
+    if basemap_name == "World Imagery":
+        folium.TileLayer(
+            tiles=WORLD_IMAGERY_TILE_URL,
+            name="World Imagery",
+            attr="Tiles © Esri",
+            overlay=False,
+            control=False,
+        ).add_to(m)
+    else:
+        folium.TileLayer(
+            tiles="OpenStreetMap",
+            name="OpenStreetMap",
+            overlay=False,
+            control=False,
+        ).add_to(m)
     
+    trail_style_fn = _trail_style_world_imagery if basemap_name == "World Imagery" else _trail_style
+
     # Camada base - todos os segmentos em estilo neutro
     if show_trail_network:
         folium.GeoJson(
             _gdf_json,
             name="Malha de trilhas",
-            style_function=_trail_style,
+            style_function=trail_style_fn,
             highlight_function=_trail_highlight,
         ).add_to(m)
 
@@ -247,6 +272,7 @@ def export_map_snapshot_bytes(
     igc_opacity: float = 0.7,
     show_trail_network: bool = True,
     show_igc: bool = True,
+    basemap_name: str = "OpenStreetMap",
     map_title: str = "Trail Planner OBB",
 ) -> bytes:
     gdf_display = gdf.to_crs("EPSG:4326")
@@ -273,7 +299,7 @@ def export_map_snapshot_bytes(
         lat = math.degrees(lat_rad)
         return lon, lat
 
-    # Fundo OSM para impressão (base map)
+    # Fundo base para impressão
     try:
         target_px_width = 2200
         zoom_estimate = int(round(math.log2((360.0 * target_px_width) / (256.0 * lon_span))))
@@ -295,7 +321,10 @@ def export_map_snapshot_bytes(
 
         for tx in range(x_min, x_max + 1):
             for ty in range(y_min, y_max + 1):
-                tile_url = f"https://tile.openstreetmap.org/{osm_zoom}/{tx}/{ty}.png"
+                if basemap_name == "World Imagery":
+                    tile_url = f"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{osm_zoom}/{ty}/{tx}"
+                else:
+                    tile_url = f"https://tile.openstreetmap.org/{osm_zoom}/{tx}/{ty}.png"
                 response = requests.get(
                     tile_url,
                     timeout=10,
@@ -344,7 +373,8 @@ def export_map_snapshot_bytes(
             pass
 
     if show_trail_network:
-        gdf_display.plot(ax=ax, facecolor="none", edgecolor="#473f30", linewidth=1.1, alpha=0.9, zorder=2)
+        trail_network_color = "#ffffff" if basemap_name == "World Imagery" else "#473f30"
+        gdf_display.plot(ax=ax, facecolor="none", edgecolor=trail_network_color, linewidth=1.1, alpha=0.9, zorder=2)
 
     if percursos_visiveis:
         for percurso in percursos_visiveis:
@@ -573,8 +603,8 @@ if st.session_state["gdf"] is not None:
         </style>
         """, unsafe_allow_html=True)
         with st.container(border=True):
-            c_seg, c_dist, c_perc, c_malha, c_igc, c_slider, c_png, c_pdf = st.columns(
-                [0.9, 1.1, 0.9, 0.8, 0.9, 1.6, 1.1, 1.1]
+            c_seg, c_dist, c_perc, c_base, c_malha, c_igc, c_slider, c_png, c_pdf = st.columns(
+                [0.85, 1.0, 0.9, 1.25, 0.75, 0.85, 1.55, 1.0, 1.0]
             )
 
             total_segs = len(gdf)
@@ -582,6 +612,13 @@ if st.session_state["gdf"] is not None:
             c_seg.metric("Total de Segmentos", total_segs)
             c_dist.metric("Distância total", f"{total_dist:,.0f} m")
             c_perc.metric("Percursos salvos", len(st.session_state["percursos_prontos"]))
+
+            mapa_base = c_base.selectbox(
+                "Mapa base",
+                ["OpenStreetMap", "World Imagery"],
+                index=0,
+                label_visibility="collapsed",
+            )
 
             mostrar_malha = c_malha.checkbox("Trilhas", value=True)
             mostrar_igc   = c_igc.checkbox("IGC 10K", value=True)
@@ -598,6 +635,7 @@ if st.session_state["gdf"] is not None:
                 round(float(opacidade_igc), 3),
                 bool(mostrar_malha),
                 bool(mostrar_igc),
+                mapa_base,
                 visible_ids,
             )
             if st.session_state.get("export_state_signature") != export_signature:
@@ -616,6 +654,7 @@ if st.session_state["gdf"] is not None:
                                 gdf, selected_ids=None, percursos_visiveis=percursos_visiveis,
                                 output_format="png", igc_opacity=opacidade_igc,
                                 show_trail_network=mostrar_malha, show_igc=mostrar_igc,
+                                basemap_name=mapa_base,
                                 map_title=export_title,
                             )
                         st.rerun()
@@ -631,6 +670,7 @@ if st.session_state["gdf"] is not None:
                                 gdf, selected_ids=None, percursos_visiveis=percursos_visiveis,
                                 output_format="pdf", igc_opacity=opacidade_igc,
                                 show_trail_network=mostrar_malha, show_igc=mostrar_igc,
+                                basemap_name=mapa_base,
                                 map_title=export_title,
                             )
                         st.rerun()
@@ -647,6 +687,7 @@ if st.session_state["gdf"] is not None:
             igc_opacity=opacidade_igc,
             show_trail_network=mostrar_malha,
             show_igc=mostrar_igc,
+            basemap_name=mapa_base,
         )
         
         # FeatureGroup com destaques (atualizado SEM re-render do mapa)
