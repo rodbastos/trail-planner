@@ -127,7 +127,6 @@ CORES_PERCURSOS = [
 st.set_page_config(page_title="Trail Planner - Outward Bound Brasil", layout="wide")
 
 st.title("🗺️ Trail Planner - OBB")
-st.markdown("Carregue um arquivo `.gpkg` para visualizar no mapa.")
 
 
 def reproject_to_meters(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -422,9 +421,6 @@ def concatenate_geometries(geometries):
     return merged
 
 
-# Upload do arquivo
-uploaded_file = st.file_uploader("Selecione um arquivo GeoPackage (.gpkg)", type=["gpkg"])
-
 # Inicializar session_state
 if "path_atual" not in st.session_state:
     st.session_state["path_atual"] = []
@@ -450,60 +446,91 @@ if "map_pdf_bytes" not in st.session_state:
     st.session_state["map_pdf_bytes"] = None
 if "export_state_signature" not in st.session_state:
     st.session_state["export_state_signature"] = None
+if "show_upload_panel" not in st.session_state:
+    st.session_state["show_upload_panel"] = True
+if "uploaded_gpkg_bytes" not in st.session_state:
+    st.session_state["uploaded_gpkg_bytes"] = None
+if "uploaded_gpkg_name" not in st.session_state:
+    st.session_state["uploaded_gpkg_name"] = None
 
 
-if uploaded_file is not None:
-    # Salvar arquivo temporariamente
-    temp_path = f"temp_{uploaded_file.name}"
-    with open(temp_path, "wb") as f:
-        f.write(uploaded_file.getvalue())
-    
-    try:
-        # Listar camadas disponíveis
-        layers = get_layer_names(temp_path)
-        
-        if not layers:
-            st.error("Nenhuma camada encontrada no arquivo.")
-        else:
-            # Seleção da camada
-            selected_layer = st.selectbox("Selecione a camada:", layers)
-            
-            # Botão para carregar
-            if st.button("📥 Carregar Camada"):
-                with st.spinner("Carregando dados..."):
-                    # Ler camada com geopandas
-                    gdf = gpd.read_file(temp_path, layer=selected_layer)
-                    
-                    # Reprojetar para metros (EPSG:31983 - SIRGAS 2000)
-                    gdf = reproject_to_meters(gdf)
-                    
-                    # Adicionar índice como coluna para identificação
-                    gdf = gdf.reset_index(drop=True)
-                    gdf["feature_id"] = gdf.index.astype(str)
-                    
-                    # Armazenar no session_state
-                    st.session_state["gdf"] = gdf
-                    st.session_state["layer_name"] = selected_layer
-                    st.session_state["source_gpkg_name"] = uploaded_file.name
-                    st.session_state["path_atual"] = []
-                    st.session_state["main_map_initialized"] = False
-                    
-                    st.success(f"✅ Camada '{selected_layer}' carregada! CRS: {gdf.crs}")
-        
-        # Limpar arquivo temporário
-        os.remove(temp_path)
-        
-    except Exception as e:
-        st.error(f"Erro ao processar arquivo: {e}")
-        if os.path.exists(temp_path):
+if st.session_state["gdf"] is None:
+    st.session_state["show_upload_panel"] = True
+
+if st.session_state["show_upload_panel"]:
+    uploaded_file = st.file_uploader(
+        "Suba um arquivo GeoPackage (.gpkg) com uma rede de trilhas mapeadas",
+        type=["gpkg"],
+    )
+
+    if uploaded_file is not None:
+        st.session_state["uploaded_gpkg_bytes"] = uploaded_file.getvalue()
+        st.session_state["uploaded_gpkg_name"] = uploaded_file.name
+
+    file_bytes = st.session_state.get("uploaded_gpkg_bytes")
+    file_name = st.session_state.get("uploaded_gpkg_name")
+
+    if file_bytes is not None and file_name is not None:
+        loaded_layer = False
+        # Salvar arquivo temporariamente
+        temp_path = f"temp_{file_name}"
+        with open(temp_path, "wb") as f:
+            f.write(file_bytes)
+
+        try:
+            # Listar camadas disponíveis
+            layers = get_layer_names(temp_path)
+
+            if not layers:
+                st.error("Nenhuma camada encontrada no arquivo.")
+            else:
+                # Seleção da camada
+                current_layer = st.session_state.get("layer_name")
+                default_layer_idx = layers.index(current_layer) if current_layer in layers else 0
+                selected_layer = st.selectbox(
+                    "Seleciona a camada onde estão as trilhas",
+                    layers,
+                    index=default_layer_idx,
+                )
+
+                # Botão para carregar
+                if st.button("📥 Carregar Camada"):
+                    with st.spinner("Carregando dados..."):
+                        # Ler camada com geopandas
+                        gdf = gpd.read_file(temp_path, layer=selected_layer)
+
+                        # Reprojetar para metros (EPSG:31983 - SIRGAS 2000)
+                        gdf = reproject_to_meters(gdf)
+
+                        # Adicionar índice como coluna para identificação
+                        gdf = gdf.reset_index(drop=True)
+                        gdf["feature_id"] = gdf.index.astype(str)
+
+                        # Armazenar no session_state
+                        st.session_state["gdf"] = gdf
+                        st.session_state["layer_name"] = selected_layer
+                        st.session_state["source_gpkg_name"] = file_name
+                        st.session_state["path_atual"] = []
+                        st.session_state["main_map_initialized"] = False
+                        st.session_state["show_upload_panel"] = False
+                        loaded_layer = True
+
+                        st.success(f"✅ Camada '{selected_layer}' carregada! CRS: {gdf.crs}")
+
+            # Limpar arquivo temporário
             os.remove(temp_path)
+            if loaded_layer:
+                st.rerun()
+
+        except Exception as e:
+            st.error(f"Erro ao processar arquivo: {e}")
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
 
 # Exibir mapa se houver dados no session_state
 if st.session_state["gdf"] is not None:
     import pandas as pd
     gdf = st.session_state["gdf"]
-    
-    st.divider()
     
     # ==================== LAYOUT PRINCIPAL ====================
     col_mapa = st.container()
@@ -526,7 +553,13 @@ if st.session_state["gdf"] is not None:
             path_gdf = gdf.loc[st.session_state["path_atual"]]
             path_length = path_gdf.geometry.length.sum()
         
-        st.markdown(f"### 🗺️ {st.session_state.get('layer_name', 'Camada')}")
+        header_col, action_col = st.columns([5, 1.4])
+        header_col.markdown(
+            f"#### Camada {st.session_state.get('layer_name', '-') } de {st.session_state.get('source_gpkg_name', '-') }"
+        )
+        if action_col.button("Trocar arquivo/camada", use_container_width=True):
+            st.session_state["show_upload_panel"] = True
+            st.rerun()
 
         # ---------- DASHBOARD (linha única) ----------
         source_name = st.session_state.get("source_gpkg_name") or "arquivo.gpkg"
@@ -1108,6 +1141,3 @@ if st.session_state["gdf"] is not None:
                 use_container_width=True,
                 key=f"sim_map_{st.session_state['sim_map_key']}",
             )
-
-else:
-    st.info("👆 Faça upload de um arquivo GeoPackage para começar.")
