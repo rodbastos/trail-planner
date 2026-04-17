@@ -255,6 +255,8 @@ if "sim_anim_data" not in st.session_state:
     st.session_state["sim_anim_data"] = None
 if "sim_map_key" not in st.session_state:
     st.session_state["sim_map_key"] = 0
+if "editando_idx" not in st.session_state:
+    st.session_state["editando_idx"] = None
 
 
 if uploaded_file is not None:
@@ -314,7 +316,13 @@ if st.session_state["gdf"] is not None:
     # ---------- COLUNA DO MAPA ----------
     with col_mapa:
         # Determinar quais percursos visualizar (coluna "ver" da tabela)
-        percursos_visiveis = [p for p in st.session_state["percursos_prontos"] if p.get("visivel", False)]
+        # Se estiver editando um percurso, ocultar temporariamente sua linha salva
+        # para evitar sobreposição visual com os segmentos selecionados.
+        editando_idx = st.session_state.get("editando_idx")
+        percursos_visiveis = [
+            p for i, p in enumerate(st.session_state["percursos_prontos"])
+            if p.get("visivel", False) and i != editando_idx
+        ]
         
         # Status bar
         n_segs = len(st.session_state["path_atual"])
@@ -373,10 +381,6 @@ if st.session_state["gdf"] is not None:
                         path_atual_int.append(nearest_idx)
                     st.session_state["path_atual"] = path_atual_int
                     st.rerun()
-    
-    # Inicializar estado de edição
-    if "editando_idx" not in st.session_state:
-        st.session_state["editando_idx"] = None
     
     # ---------- TABELA ABAIXO DO MAPA ----------
     with st.container():
