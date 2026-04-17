@@ -121,7 +121,7 @@ CORES_PERCURSOS = [
     '#aaffc3', '#808000', '#ffd8b1', '#000075', '#808080'
 ]
 
-st.set_page_config(page_title="GeoPackage Viewer", layout="wide")
+st.set_page_config(page_title="Trail Planner - Outward Bound Brasil", layout="wide")
 
 st.title("🗺️ Trail Planner - OBB")
 st.markdown("Carregue um arquivo `.gpkg` para visualizar no mapa.")
@@ -438,7 +438,7 @@ if st.session_state["gdf"] is not None:
                             "num_segmentos": n_segs,
                             "cor": CORES_PERCURSOS[cor_idx],
                             "visivel": True,
-                            "velocidade_ms": 3.0,
+                            "velocidade_ms": 3.0 / 3.6,
                             "extremidade_inicio": "A",
                             "modo_corredor": "um",
                         }
