@@ -2,16 +2,19 @@ import streamlit as st
 import geopandas as gpd
 import folium
 from streamlit_folium import st_folium
-from folium.plugins import Draw, TimestampedGeoJson
+from folium.plugins import Draw, TimestampedGeoJson, Fullscreen
 import os
 from datetime import datetime, timedelta
 import math
 from urllib.parse import quote
 import re
 import tempfile
+import io
 from shapely.geometry import LineString, MultiLineString, Point
 from shapely.ops import linemerge
 import random
+import matplotlib.pyplot as plt
+import requests
 
 
 class Corredor:
@@ -144,26 +147,58 @@ def get_layer_names(gpkg_path: str) -> list:
     return gpd.list_layers(gpkg_path)["name"].tolist()
 
 
-def get_base_map_html(_gdf_id: str, gdf_json: str, bounds_tuple: tuple) -> folium.Map:
+def _trail_style(_feature):
+    return {'color': '#473f30', 'weight': 4, 'opacity': 0.75}
+
+
+def _trail_highlight(_feature):
+    return {'weight': 8, 'color': 'yellow', 'opacity': 1.0}
+
+
+@st.cache_data(show_spinner=False)
+def get_base_map_html(
+    gdf_id: str,
+    _gdf_json: str,
+    bounds_tuple: tuple,
+    igc_opacity: float = 0.7,
+    show_trail_network: bool = True,
+    show_igc: bool = True,
+) -> folium.Map:
     """Cria o MAPA BASE com todos os segmentos em estilo neutro."""
     center_lat = (bounds_tuple[1] + bounds_tuple[3]) / 2
     center_lon = (bounds_tuple[0] + bounds_tuple[2]) / 2
+    map_center = [center_lat, center_lon]
+
+    m = folium.Map(location=map_center, tiles="OpenStreetMap")
     
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles="OpenStreetMap")
-    
-    # Camada base - todos os segmentos em azul neutro
-    folium.GeoJson(
-        gdf_json,
-        name="Malha de trilhas",
-        style_function=lambda feature: {
-            'color': '#473f30',
-            'weight': 4,
-            'opacity': 0.75,
-        },
-        highlight_function=lambda x: {'weight': 8, 'color': 'yellow', 'opacity': 1.0},
+    # Camada base - todos os segmentos em estilo neutro
+    if show_trail_network:
+        folium.GeoJson(
+            _gdf_json,
+            name="Malha de trilhas",
+            style_function=_trail_style,
+            highlight_function=_trail_highlight,
+        ).add_to(m)
+
+    if show_igc:
+        folium.WmsTileLayer(
+            url="https://datageo.ambiente.sp.gov.br/geoimage/datageoimg/ows?SERVICE=WMS",
+            name="IGC 2010 TOPO 10K",
+            layers="IGC_2010_TOPO_10K",
+            fmt="image/png",
+            transparent=True,
+            opacity=igc_opacity,
+            overlay=True,
+            control=False,
+        ).add_to(m)
+
+    Fullscreen(
+        position="topright",
+        title="Tela cheia",
+        title_cancel="Sair da tela cheia",
+        force_separate_button=True,
     ).add_to(m)
     
-    # Ajustar bounds apenas no primeiro render
     m.fit_bounds([[bounds_tuple[1], bounds_tuple[0]], [bounds_tuple[3], bounds_tuple[2]]])
     
     return m
@@ -203,6 +238,154 @@ def build_highlight_fg(gdf: gpd.GeoDataFrame, selected_ids: list = None, percurs
                 pass
     
     return fg
+
+
+def export_map_snapshot_bytes(
+    gdf: gpd.GeoDataFrame,
+    selected_ids: list = None,
+    percursos_visiveis=None,
+    output_format: str = "png",
+    igc_opacity: float = 0.7,
+    show_trail_network: bool = True,
+    show_igc: bool = True,
+    map_title: str = "Trail Planner OBB",
+) -> bytes:
+    gdf_display = gdf.to_crs("EPSG:4326")
+    minx, miny, maxx, maxy = gdf_display.total_bounds
+    lon_span = max(maxx - minx, 1e-6)
+    lat_span = max(maxy - miny, 1e-6)
+    aspect_data = lat_span / lon_span
+
+    fig_width = 8.0
+    fig_height = max(7.0, min(12.0, fig_width * aspect_data))
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+
+    def lonlat_to_tile(lon: float, lat: float, zoom: int):
+        n = 2 ** zoom
+        x = int((lon + 180.0) / 360.0 * n)
+        lat_rad = math.radians(max(min(lat, 85.05112878), -85.05112878))
+        y = int((1.0 - math.log(math.tan(lat_rad) + (1.0 / math.cos(lat_rad))) / math.pi) / 2.0 * n)
+        return x, y
+
+    def tile_to_lonlat(x: int, y: int, zoom: int):
+        n = 2 ** zoom
+        lon = x / n * 360.0 - 180.0
+        lat_rad = math.atan(math.sinh(math.pi * (1.0 - 2.0 * y / n)))
+        lat = math.degrees(lat_rad)
+        return lon, lat
+
+    # Fundo OSM para impressão (base map)
+    try:
+        target_px_width = 2200
+        zoom_estimate = int(round(math.log2((360.0 * target_px_width) / (256.0 * lon_span))))
+        osm_zoom = max(11, min(18, zoom_estimate))
+
+        x_min, y_max = lonlat_to_tile(minx, miny, osm_zoom)
+        x_max, y_min = lonlat_to_tile(maxx, maxy, osm_zoom)
+        x_min, x_max = sorted((x_min, x_max))
+        y_min, y_max = sorted((y_min, y_max))
+
+        tile_count = (x_max - x_min + 1) * (y_max - y_min + 1)
+        while tile_count > 120 and osm_zoom > 11:
+            osm_zoom -= 1
+            x_min, y_max = lonlat_to_tile(minx, miny, osm_zoom)
+            x_max, y_min = lonlat_to_tile(maxx, maxy, osm_zoom)
+            x_min, x_max = sorted((x_min, x_max))
+            y_min, y_max = sorted((y_min, y_max))
+            tile_count = (x_max - x_min + 1) * (y_max - y_min + 1)
+
+        for tx in range(x_min, x_max + 1):
+            for ty in range(y_min, y_max + 1):
+                tile_url = f"https://tile.openstreetmap.org/{osm_zoom}/{tx}/{ty}.png"
+                response = requests.get(
+                    tile_url,
+                    timeout=10,
+                    headers={"User-Agent": "trail-planner-export/1.0"},
+                )
+                content_type = response.headers.get("Content-Type", "")
+                if not response.ok or "image" not in content_type.lower() or not response.content:
+                    continue
+
+                tile_img = plt.imread(io.BytesIO(response.content), format="png")
+                left, top = tile_to_lonlat(tx, ty, osm_zoom)
+                right, bottom = tile_to_lonlat(tx + 1, ty + 1, osm_zoom)
+                ax.imshow(
+                    tile_img,
+                    extent=[left, right, bottom, top],
+                    origin="upper",
+                    alpha=1.0,
+                    zorder=0,
+                )
+    except Exception:
+        pass
+
+    if show_igc:
+        try:
+            wms_response = requests.get(
+                "https://datageo.ambiente.sp.gov.br/geoimage/datageoimg/ows",
+                params={
+                    "SERVICE": "WMS",
+                    "VERSION": "1.1.1",
+                    "REQUEST": "GetMap",
+                    "LAYERS": "IGC_2010_TOPO_10K",
+                    "STYLES": "",
+                    "FORMAT": "image/png",
+                    "TRANSPARENT": "TRUE",
+                    "SRS": "EPSG:4326",
+                    "BBOX": f"{minx},{miny},{maxx},{maxy}",
+                    "WIDTH": 1800,
+                    "HEIGHT": 1200,
+                },
+                timeout=20,
+            )
+            if wms_response.ok and wms_response.content:
+                raster = plt.imread(io.BytesIO(wms_response.content), format="png")
+                ax.imshow(raster, extent=[minx, maxx, miny, maxy], origin="upper", alpha=igc_opacity, zorder=1)
+        except Exception:
+            pass
+
+    if show_trail_network:
+        gdf_display.plot(ax=ax, facecolor="none", edgecolor="#473f30", linewidth=1.1, alpha=0.9, zorder=2)
+
+    if percursos_visiveis:
+        for percurso in percursos_visiveis:
+            geom = percurso.get("geometria")
+            if geom is None:
+                continue
+            try:
+                geom_4326 = gpd.GeoSeries([geom], crs=gdf.crs).to_crs("EPSG:4326")
+                geom_4326.plot(ax=ax, color=percurso.get("cor", "blue"), linewidth=2.5, alpha=0.95, zorder=3)
+            except Exception:
+                pass
+
+    ax.set_xlim(minx, maxx)
+    ax.set_ylim(miny, maxy)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_title(map_title, fontsize=12)
+    ax.set_xlabel("")
+    ax.set_ylabel("")
+    ax.tick_params(axis="both", which="major", labelsize=7)
+    ax.xaxis.get_offset_text().set_fontsize(7)
+    ax.yaxis.get_offset_text().set_fontsize(7)
+    ax.grid(alpha=0.2)
+    ax.text(
+        0.01,
+        0.01,
+        "© OpenStreetMap contributors",
+        transform=ax.transAxes,
+        fontsize=6,
+        ha="left",
+        va="bottom",
+        color="#222222",
+        bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.65, "pad": 1.5},
+    )
+
+    buffer = io.BytesIO()
+    fmt = "pdf" if output_format.lower() == "pdf" else "png"
+    fig.savefig(buffer, format=fmt, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+    buffer.seek(0)
+    return buffer.getvalue()
 
 
 def find_nearest_feature(gdf: gpd.GeoDataFrame, click_lat: float, click_lon: float, max_distance: float = 100):
@@ -255,8 +438,18 @@ if "sim_anim_data" not in st.session_state:
     st.session_state["sim_anim_data"] = None
 if "sim_map_key" not in st.session_state:
     st.session_state["sim_map_key"] = 0
+if "source_gpkg_name" not in st.session_state:
+    st.session_state["source_gpkg_name"] = None
+if "main_map_initialized" not in st.session_state:
+    st.session_state["main_map_initialized"] = False
 if "editando_idx" not in st.session_state:
     st.session_state["editando_idx"] = None
+if "map_png_bytes" not in st.session_state:
+    st.session_state["map_png_bytes"] = None
+if "map_pdf_bytes" not in st.session_state:
+    st.session_state["map_pdf_bytes"] = None
+if "export_state_signature" not in st.session_state:
+    st.session_state["export_state_signature"] = None
 
 
 if uploaded_file is not None:
@@ -291,7 +484,9 @@ if uploaded_file is not None:
                     # Armazenar no session_state
                     st.session_state["gdf"] = gdf
                     st.session_state["layer_name"] = selected_layer
+                    st.session_state["source_gpkg_name"] = uploaded_file.name
                     st.session_state["path_atual"] = []
+                    st.session_state["main_map_initialized"] = False
                     
                     st.success(f"✅ Camada '{selected_layer}' carregada! CRS: {gdf.crs}")
         
@@ -332,18 +527,94 @@ if st.session_state["gdf"] is not None:
             path_length = path_gdf.geometry.length.sum()
         
         st.markdown(f"### 🗺️ {st.session_state.get('layer_name', 'Camada')}")
-        
-        status_cols = st.columns(3)
-        status_cols[0].metric("Segmentos selecionados", n_segs)
-        status_cols[1].metric("Distância atual", f"{path_length:,.0f} m")
-        status_cols[2].metric("Percursos salvos", len(st.session_state["percursos_prontos"]))
+
+        # ---------- DASHBOARD (linha única) ----------
+        source_name = st.session_state.get("source_gpkg_name") or "arquivo.gpkg"
+        source_stem = os.path.splitext(source_name)[0]
+        export_title = f"Trail Planner OBB - {source_stem}"
+
+        st.markdown("""
+        <style>
+        [data-testid="stMetricValue"] { font-size: 0.95rem !important; }
+        [data-testid="stMetricLabel"] { font-size: 0.7rem !important; }
+        </style>
+        """, unsafe_allow_html=True)
+        with st.container(border=True):
+            c_seg, c_dist, c_perc, c_malha, c_igc, c_slider, c_png, c_pdf = st.columns(
+                [0.9, 1.1, 0.9, 0.8, 0.9, 1.6, 1.1, 1.1]
+            )
+
+            total_segs = len(gdf)
+            total_dist = gdf.geometry.length.sum()
+            c_seg.metric("Total de Segmentos", total_segs)
+            c_dist.metric("Distância total", f"{total_dist:,.0f} m")
+            c_perc.metric("Percursos salvos", len(st.session_state["percursos_prontos"]))
+
+            mostrar_malha = c_malha.checkbox("Trilhas", value=True)
+            mostrar_igc   = c_igc.checkbox("IGC 10K", value=True)
+            opacidade_igc = c_slider.slider(
+                "Opacidade IGC",
+                min_value=0.0, max_value=1.0, value=0.7, step=0.05,
+                disabled=not mostrar_igc,
+                label_visibility="collapsed",
+            )
+
+            visible_ids = tuple(sorted(int(p.get("id", -1)) for p in percursos_visiveis if p.get("id") is not None))
+            export_signature = (
+                source_stem,
+                round(float(opacidade_igc), 3),
+                bool(mostrar_malha),
+                bool(mostrar_igc),
+                visible_ids,
+            )
+            if st.session_state.get("export_state_signature") != export_signature:
+                st.session_state["map_png_bytes"] = None
+                st.session_state["map_pdf_bytes"] = None
+                st.session_state["export_state_signature"] = export_signature
+
+            with c_png:
+                if st.session_state.get("map_png_bytes"):
+                    st.download_button("⬇️ PNG", data=st.session_state["map_png_bytes"],
+                        file_name="mapa_percursos.png", mime="image/png", use_container_width=True)
+                else:
+                    if st.button("🖼️ Gerar PNG", use_container_width=True):
+                        with st.spinner("Gerando..."):
+                            st.session_state["map_png_bytes"] = export_map_snapshot_bytes(
+                                gdf, selected_ids=None, percursos_visiveis=percursos_visiveis,
+                                output_format="png", igc_opacity=opacidade_igc,
+                                show_trail_network=mostrar_malha, show_igc=mostrar_igc,
+                                map_title=export_title,
+                            )
+                        st.rerun()
+
+            with c_pdf:
+                if st.session_state.get("map_pdf_bytes"):
+                    st.download_button("⬇️ PDF", data=st.session_state["map_pdf_bytes"],
+                        file_name="mapa_percursos.pdf", mime="application/pdf", use_container_width=True)
+                else:
+                    if st.button("📄 Gerar PDF", use_container_width=True):
+                        with st.spinner("Gerando..."):
+                            st.session_state["map_pdf_bytes"] = export_map_snapshot_bytes(
+                                gdf, selected_ids=None, percursos_visiveis=percursos_visiveis,
+                                output_format="pdf", igc_opacity=opacidade_igc,
+                                show_trail_network=mostrar_malha, show_igc=mostrar_igc,
+                                map_title=export_title,
+                            )
+                        st.rerun()
         
         # Criar mapa BASE (cacheado - não re-renderiza a cada interação)
         selected_ids = [str(idx) for idx in st.session_state.get("path_atual", [])]
         gdf_display = gdf.to_crs("EPSG:4326")
         bounds_tuple = tuple(gdf_display.total_bounds)
         layer_key = st.session_state.get("layer_name", "default")
-        base_map = get_base_map_html(layer_key, gdf_display.to_json(), bounds_tuple)
+        base_map = get_base_map_html(
+            layer_key,
+            gdf_display.to_json(),
+            bounds_tuple,
+            igc_opacity=opacidade_igc,
+            show_trail_network=mostrar_malha,
+            show_igc=mostrar_igc,
+        )
         
         # FeatureGroup com destaques (atualizado SEM re-render do mapa)
         highlight_fg = build_highlight_fg(gdf, selected_ids, percursos_visiveis)
@@ -358,6 +629,7 @@ if st.session_state["gdf"] is not None:
             use_container_width=True,
             key="main_map",
         )
+        st.session_state["main_map_initialized"] = True
         
         # Processar clique para adicionar segmento ao percurso atual
         if map_data and map_data.get("last_clicked"):
@@ -531,7 +803,7 @@ if st.session_state["gdf"] is not None:
                         width="small",
                     ),
                     "corredores": st.column_config.SelectboxColumn(
-                        "Runners",
+                        "Patrols",
                         help="'um' = 1 corredor | 'dois' = um em cada extremidade",
                         options=["um", "dois"],
                         required=True,
@@ -653,10 +925,10 @@ if st.session_state["gdf"] is not None:
     
     # ==================== SIMULADOR DE CORREDORES ====================
     st.divider()
-    st.markdown("### 🏃 Simulador de Corredores")
+    st.markdown("### 🏃 Simulador de Patrols")
     
     if not st.session_state["percursos_prontos"]:
-        st.info("💾 Salve pelo menos um percurso para simular corredores.")
+        st.info("💾 Salve pelo menos um percurso para simular Patrols.")
     else:
         sim_c3, sim_c4 = st.columns([1, 1])
 
@@ -826,7 +1098,7 @@ if st.session_state["gdf"] is not None:
             ).add_to(sim_map)
 
             st.info(
-                f"Simulação ativa: {sim_data['num_corredores']} corredores | "
+                f"Simulação ativa: {sim_data['num_corredores']} Patrols | "
                 f"tempo real total ~{sim_data['tempo_max']:.0f}s | passo de amostragem {sim_data['step_sim_s']}s"
             )
             st_folium(
