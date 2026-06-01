@@ -69,6 +69,56 @@ def sanitize_layer_name(name: str) -> str:
     return clean[:48] if clean else "percurso"
 
 
+def import_percursos_from_gpkg(file_bytes: bytes, target_crs) -> list:
+    """Lê um GeoPackage exportado (cada camada = 1 percurso) e devolve lista de dicts percurso."""
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".gpkg", delete=False) as tmp:
+            tmp.write(file_bytes)
+            temp_path = tmp.name
+
+        layer_names = gpd.list_layers(temp_path)["name"].tolist()
+        if not layer_names:
+            raise ValueError("Nenhuma camada encontrada no GeoPackage.")
+
+        percursos = []
+        for layer_name in layer_names:
+            layer_gdf = gpd.read_file(temp_path, layer=layer_name)
+            if layer_gdf.empty:
+                continue
+
+            # Reprojetar para o CRS alvo se necessário
+            if layer_gdf.crs is not None and str(layer_gdf.crs) != str(target_crs):
+                layer_gdf = layer_gdf.to_crs(target_crs)
+            elif layer_gdf.crs is None:
+                layer_gdf = layer_gdf.set_crs(target_crs)
+
+            row = layer_gdf.iloc[0]
+            geom = row.geometry
+            if geom is None:
+                continue
+
+            percurso = {
+                "id": int(row.get("id", 0)) if "id" in layer_gdf.columns else 0,
+                "nome": str(row.get("nome", layer_name)) if "nome" in layer_gdf.columns else layer_name,
+                "indices": [],
+                "geometria": geom,
+                "comprimento_metros": float(row.get("dist_m", geom.length)) if "dist_m" in layer_gdf.columns else float(geom.length),
+                "num_segmentos": int(row.get("n_segs", 0)) if "n_segs" in layer_gdf.columns else 0,
+                "cor": str(row.get("cor", "#808080")) if "cor" in layer_gdf.columns else "#808080",
+                "visivel": True,
+                "velocidade_ms": float(row.get("vel_ms", 3.0 / 3.6)) if "vel_ms" in layer_gdf.columns else 3.0 / 3.6,
+                "extremidade_inicio": str(row.get("inicio", "A")) if "inicio" in layer_gdf.columns else "A",
+                "modo_corredor": str(row.get("modo", "um")) if "modo" in layer_gdf.columns else "um",
+            }
+            percursos.append(percurso)
+
+        return percursos
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
 def export_percursos_to_gpkg_bytes(percursos: list, crs) -> bytes:
     temp_path = None
     try:
@@ -808,6 +858,33 @@ if st.session_state["gdf"] is not None:
         
         if not st.session_state["percursos_prontos"]:
             st.info("Nenhum percurso salvo ainda.")
+            import_cols_empty = st.columns([3, 1])
+            with import_cols_empty[0]:
+                imported_file_empty = st.file_uploader(
+                    "Importar percursos de um GeoPackage exportado",
+                    type=["gpkg"],
+                    key="import_percursos_gpkg_empty",
+                    label_visibility="collapsed",
+                )
+            with import_cols_empty[1]:
+                if st.button("📂 Importar .gpkg", use_container_width=True,
+                             help="Importa percursos de um GeoPackage (mesmo formato da exportação)",
+                             disabled=imported_file_empty is None,
+                             key="btn_import_empty"):
+                    try:
+                        novos = import_percursos_from_gpkg(imported_file_empty.getvalue(), gdf.crs)
+                        if not novos:
+                            st.warning("Nenhum percurso válido encontrado no arquivo.")
+                        else:
+                            for i, p in enumerate(novos):
+                                p["id"] = i
+                                if p["cor"] == "#808080":
+                                    p["cor"] = CORES_PERCURSOS[i % len(CORES_PERCURSOS)]
+                            st.session_state["percursos_prontos"].extend(novos)
+                            st.success(f"✅ {len(novos)} percurso(s) importado(s)!")
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"Erro ao importar: {e}")
         else:
             # Montar DataFrame com colunas de ação (editar + deletar)
             percursos_df = pd.DataFrame([
@@ -992,6 +1069,36 @@ if st.session_state["gdf"] is not None:
                     st.button("📦 Exportar .gpkg", disabled=True, use_container_width=True)
                     st.caption(f"Exportação indisponível: {e}")
             
+            # ===== IMPORTAR PERCURSOS DE GEOPACKAGE =====
+            import_cols = st.columns([3, 1])
+            with import_cols[0]:
+                imported_file = st.file_uploader(
+                    "Importar percursos de um GeoPackage exportado",
+                    type=["gpkg"],
+                    key="import_percursos_gpkg",
+                    label_visibility="collapsed",
+                )
+            with import_cols[1]:
+                if st.button("📂 Importar .gpkg", use_container_width=True,
+                             help="Importa percursos de um GeoPackage (mesmo formato da exportação)",
+                             disabled=imported_file is None):
+                    try:
+                        novos = import_percursos_from_gpkg(imported_file.getvalue(), gdf.crs)
+                        if not novos:
+                            st.warning("Nenhum percurso válido encontrado no arquivo.")
+                        else:
+                            base_id = len(st.session_state["percursos_prontos"])
+                            for i, p in enumerate(novos):
+                                p["id"] = base_id + i
+                                # Atribuir cor do ciclo se a cor padrão vier cinza
+                                if p["cor"] == "#808080":
+                                    p["cor"] = CORES_PERCURSOS[(base_id + i) % len(CORES_PERCURSOS)]
+                            st.session_state["percursos_prontos"].extend(novos)
+                            st.success(f"✅ {len(novos)} percurso(s) importado(s)!")
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"Erro ao importar: {e}")
+
             st.caption(
                 "💡 **Ver no mapa**: marque 👁️ | **Renomear/Cor**: clique 2x na célula | "
                 "**Editar segmentos**: marque ✏️ (carrega no mapa) | **Deletar**: marque 🗑️ + botão Excluir"
