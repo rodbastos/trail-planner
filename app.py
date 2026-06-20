@@ -324,6 +324,7 @@ def export_map_snapshot_bytes(
     show_igc: bool = True,
     basemap_name: str = "OpenStreetMap",
     map_title: str = "Trail Planner OBB",
+    pdf_orientation: str = "landscape",
 ) -> bytes:
     gdf_display = gdf.to_crs("EPSG:4326")
     minx, miny, maxx, maxy = gdf_display.total_bounds
@@ -334,9 +335,13 @@ def export_map_snapshot_bytes(
     is_pdf = output_format.lower() == "pdf"
 
     if is_pdf:
-        # A4 landscape dimensions in inches (297mm x 210mm)
-        fig_width = 11.69
-        fig_height = 8.27
+        # A4 dimensions in inches (297mm x 210mm)
+        if pdf_orientation == "portrait":
+            fig_width = 8.27
+            fig_height = 11.69
+        else:
+            fig_width = 11.69
+            fig_height = 8.27
         fig, ax = plt.subplots(figsize=(fig_width, fig_height))
         fig.subplots_adjust(left=0.06, right=0.98, top=0.94, bottom=0.06)
         # Compute axes area aspect ratio to expand data bounds accordingly
@@ -683,8 +688,8 @@ if st.session_state["gdf"] is not None:
         </style>
         """, unsafe_allow_html=True)
         with st.container(border=True):
-            c_seg, c_dist, c_perc, c_base, c_malha, c_igc, c_slider, c_png, c_pdf = st.columns(
-                [0.85, 1.0, 0.9, 1.25, 0.75, 0.85, 1.55, 1.0, 1.0]
+            c_seg, c_dist, c_perc, c_base, c_malha, c_igc, c_slider, c_orient, c_png, c_pdf = st.columns(
+                [0.85, 1.0, 0.9, 1.25, 0.75, 0.85, 1.55, 1.1, 1.0, 1.0]
             )
 
             total_segs = len(gdf)
@@ -709,6 +714,14 @@ if st.session_state["gdf"] is not None:
                 label_visibility="collapsed",
             )
 
+            pdf_orient = c_orient.selectbox(
+                "Orientação PDF",
+                ["Paisagem", "Retrato"],
+                index=0,
+                label_visibility="collapsed",
+            )
+            pdf_orientation = "landscape" if pdf_orient == "Paisagem" else "portrait"
+
             visible_ids = tuple(sorted(int(p.get("id", -1)) for p in percursos_visiveis if p.get("id") is not None))
             export_signature = (
                 source_stem,
@@ -717,6 +730,7 @@ if st.session_state["gdf"] is not None:
                 bool(mostrar_igc),
                 mapa_base,
                 visible_ids,
+                pdf_orientation,
             )
             if st.session_state.get("export_state_signature") != export_signature:
                 st.session_state["map_png_bytes"] = None
@@ -752,6 +766,7 @@ if st.session_state["gdf"] is not None:
                                 show_trail_network=mostrar_malha, show_igc=mostrar_igc,
                                 basemap_name=mapa_base,
                                 map_title=export_title,
+                                pdf_orientation=pdf_orientation,
                             )
                         st.rerun()
         
