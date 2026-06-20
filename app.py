@@ -331,9 +331,37 @@ def export_map_snapshot_bytes(
     lat_span = max(maxy - miny, 1e-6)
     aspect_data = lat_span / lon_span
 
-    fig_width = 8.0
-    fig_height = max(7.0, min(12.0, fig_width * aspect_data))
-    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    is_pdf = output_format.lower() == "pdf"
+
+    if is_pdf:
+        # A4 landscape dimensions in inches (297mm x 210mm)
+        fig_width = 11.69
+        fig_height = 8.27
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+        fig.subplots_adjust(left=0.06, right=0.98, top=0.94, bottom=0.06)
+        # Compute axes area aspect ratio to expand data bounds accordingly
+        axes_w = (0.98 - 0.06) * fig_width
+        axes_h = (0.94 - 0.06) * fig_height
+        target_aspect = axes_w / axes_h  # desired lon_span / lat_span
+        current_aspect = lon_span / lat_span
+        pad = 0.05
+        cx, cy = (minx + maxx) / 2, (miny + maxy) / 2
+        if current_aspect < target_aspect:
+            new_lon_span = lat_span * (1 + pad) * target_aspect
+            new_lat_span = lat_span * (1 + pad)
+        else:
+            new_lon_span = lon_span * (1 + pad)
+            new_lat_span = lon_span * (1 + pad) / target_aspect
+        minx = cx - new_lon_span / 2
+        maxx = cx + new_lon_span / 2
+        miny = cy - new_lat_span / 2
+        maxy = cy + new_lat_span / 2
+        lon_span = new_lon_span
+        lat_span = new_lat_span
+    else:
+        fig_width = 8.0
+        fig_height = max(7.0, min(12.0, fig_width * aspect_data))
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height))
 
     def lonlat_to_tile(lon: float, lat: float, zoom: int):
         n = 2 ** zoom
@@ -460,8 +488,10 @@ def export_map_snapshot_bytes(
     )
 
     buffer = io.BytesIO()
-    fmt = "pdf" if output_format.lower() == "pdf" else "png"
-    fig.savefig(buffer, format=fmt, dpi=220, bbox_inches="tight")
+    if is_pdf:
+        fig.savefig(buffer, format="pdf", dpi=220)
+    else:
+        fig.savefig(buffer, format="png", dpi=220, bbox_inches="tight")
     plt.close(fig)
     buffer.seek(0)
     return buffer.getvalue()
